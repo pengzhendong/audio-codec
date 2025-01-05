@@ -17,7 +17,7 @@ import math
 import torch
 import torch.nn.functional as F
 from modelscope import model_file_download
-from moshi.models.loaders import FRAME_RATE, get_mimi, SAMPLE_RATE
+from moshi.models.loaders import FRAME_RATE, SAMPLE_RATE, get_mimi
 
 
 class Mimi:
@@ -44,7 +44,13 @@ class Mimi:
             yield self.model.encode(chunk)
 
     @torch.inference_mode()
-    def encode(self, audio: torch.Tensor, audio_lens: torch.Tensor = None, batch_duration: float = None, chunk_duration: float = 12, streaming: bool = True):
+    def encode(
+        self,
+        audio: torch.Tensor,
+        batch_duration: float = None,
+        chunk_duration: float = 12,
+        streaming: bool = True,
+    ):
         B, C, T = audio.shape
         assert C == 1, "Mimi only supports mono audio."
         chunk_size = math.floor(chunk_duration * SAMPLE_RATE)
@@ -59,7 +65,7 @@ class Mimi:
             batch_duration = batch_duration or B * chunk_duration
             codes = self.non_streaming_encode(audio, batch_duration)
         codes = torch.cat(list(codes), dim=-1)
-        return codes[..., :-int(pad_size * FRAME_RATE // SAMPLE_RATE)] if pad_size > 0 else codes
+        return codes[..., : -int(pad_size * FRAME_RATE // SAMPLE_RATE)] if pad_size > 0 else codes
 
     @torch.inference_mode()
     def decode(self, codes: torch.Tensor, chunk_duration: float = 12):
@@ -69,11 +75,10 @@ class Mimi:
         pad_size = int(num_chunks * chunk_size - T)
         if pad_size > 0:
             codes = F.pad(codes, (0, pad_size), "constant", 0)
-
         with self.model.streaming(B):
             audio = []
             for i in range(0, T, chunk_size):
                 chunk = codes[..., i : i + chunk_size].to(self.device)
                 audio.append(self.model.decode(chunk))
         audio = torch.cat(audio, dim=-1)
-        return audio[..., :-int(pad_size * SAMPLE_RATE // FRAME_RATE)] if pad_size > 0 else audio
+        return audio[..., : -int(pad_size * SAMPLE_RATE // FRAME_RATE)] if pad_size > 0 else audio
