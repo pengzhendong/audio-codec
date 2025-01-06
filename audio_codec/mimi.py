@@ -21,9 +21,11 @@ from moshi.models.loaders import FRAME_RATE, SAMPLE_RATE, get_mimi
 
 
 class Mimi:
-    def __init__(self, model_id: str = "AI-ModelScope", device: str = "cpu"):
+    def __init__(self, model_id: str = "AI-ModelScope/moshika-pytorch-bf16", device: str = "cpu"):
         model_path = model_file_download(model_id, "tokenizer-e351c8d8-checkpoint125.safetensors")
         self.device = device
+        self.frame_shift = 1 / FRAME_RATE
+        self.window_hop = round(self.frame_shift * SAMPLE_RATE)
         self.model = get_mimi(model_path, device)
 
     @torch.inference_mode()
@@ -47,6 +49,7 @@ class Mimi:
     def encode(
         self,
         audio: torch.Tensor,
+        audio_lens: torch.Tensor = None,
         batch_duration: float = None,
         chunk_duration: float = 12,
         streaming: bool = True,
@@ -65,10 +68,15 @@ class Mimi:
             batch_duration = batch_duration or B * chunk_duration
             codes = self.non_streaming_encode(audio, batch_duration)
         codes = torch.cat(list(codes), dim=-1)
-        return codes[..., : -int(pad_size * FRAME_RATE // SAMPLE_RATE)] if pad_size > 0 else codes
+        if pad_size > 0:
+            codes = codes[..., : -int(pad_size * FRAME_RATE // SAMPLE_RATE)]
+        if audio_lens is not None:
+            # https://lhotse.readthedocs.io/en/latest/features.html
+            num_frames = ((audio_lens + self.window_hop // 2) // self.window_hop).long()
+        return codes if audio_lens is None else (codes, num_frames)
 
     @torch.inference_mode()
-    def decode(self, codes: torch.Tensor, chunk_duration: float = 12):
+    def decode(self, codes: torch.Tensor, num_frames: torch.Tensor = None, chunk_duration: float = 12):
         B, _, T = codes.shape
         chunk_size = math.floor(chunk_duration * FRAME_RATE)
         num_chunks = (T - 1) // chunk_size + 1
@@ -81,4 +89,8 @@ class Mimi:
                 chunk = codes[..., i : i + chunk_size].to(self.device)
                 audio.append(self.model.decode(chunk))
         audio = torch.cat(audio, dim=-1)
-        return audio[..., : -int(pad_size * SAMPLE_RATE // FRAME_RATE)] if pad_size > 0 else audio
+        if pad_size > 0:
+            audio = audio[..., : -int(pad_size * SAMPLE_RATE // FRAME_RATE)]
+        if num_frames is not None:
+            audio_lens = (num_frames * self.window_hop).long()
+        return audio if num_frames is None else (audio, audio_lens)
